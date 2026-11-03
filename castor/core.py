@@ -11,10 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .adapters import EXTENSIONS, adapters_for
+from .adapters.php import scan_php_literals  # noqa: F401  (re-export)
+from .adapters.sqlfile import sql_statements  # noqa: F401  (re-export)
+
 VERSION = "0.1.0"
-EXTENSIONS = {".php", ".phtml", ".inc", ".sql"}
 IGNORED = {".git", ".castor", "node_modules", "vendor", "bower_components", ".venv", "venv", "__pycache__", "dist", "build"}
-SQL_START = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE\s+TABLE|ALTER\s+TABLE|WITH|CALL)\b", re.I)
 IDENT = re.compile(r"^[A-Za-z_][\w$]*$")
 STOP = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "USING", "SET", "VALUES", "RETURNING", "FOR"}
 
@@ -77,116 +79,6 @@ def sql_tokens(sql: str) -> list[str]:
         out.append(c)
         i += 1
     return out
-
-
-def scan_php_literals(source: str) -> list[tuple[str, int, bool]]:
-    """Extract PHP single/double quoted string literals without interpreting code."""
-    items = []
-    i = 0
-    line = 1
-    php = False
-    while i < len(source):
-        if not php and source.startswith("<?", i):
-            php = True
-            i += 2
-            continue
-        if php and source.startswith("?>", i):
-            php = False
-            i += 2
-            continue
-        if not php:
-            if source[i] == "\n":
-                line += 1
-            i += 1
-            continue
-        if source.startswith("//", i) or source[i] == "#":
-            end = source.find("\n", i)
-            i = len(source) if end < 0 else end
-            continue
-        if source.startswith("/*", i):
-            end = source.find("*/", i + 2)
-            end = len(source) if end < 0 else end + 2
-            line += source[i:end].count("\n")
-            i = end
-            continue
-        if source[i] not in ("'", '"'):
-            if source[i] == "\n":
-                line += 1
-            i += 1
-            continue
-        quote = source[i]
-        start_line = line
-        i += 1
-        chars = []
-        while i < len(source):
-            c = source[i]
-            if c == "\\" and i + 1 < len(source):
-                chars.extend([c, source[i + 1]])
-                i += 2
-                continue
-            if c == quote:
-                i += 1
-                break
-            chars.append(c)
-            if c == "\n":
-                line += 1
-            i += 1
-        value = "".join(chars)
-        # PHP interpolates variables in double-quoted strings.
-        dynamic = quote == '"' and "$" in value
-        items.append((value, start_line, dynamic))
-    return items
-
-
-def sql_statements(source: str) -> list[tuple[str, int]]:
-    """Split .sql on semicolons outside strings and comments, tracking lines."""
-    result = []
-    start = 0
-    line = 1
-    start_line = 1
-    quote = None
-    comment = None
-    i = 0
-    while i < len(source):
-        c = source[i]
-        if comment == "line":
-            if c == "\n":
-                comment = None
-        elif comment == "block":
-            if source.startswith("*/", i):
-                comment = None
-                i += 2
-                continue
-        elif quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                if i + 1 < len(source) and source[i + 1] == quote:
-                    i += 2
-                    continue
-                quote = None
-        elif source.startswith("/*", i):
-            comment = "block"
-        elif source.startswith("--", i) and (i + 2 >= len(source) or source[i + 2].isspace()) or c == "#":
-            comment = "line"
-        elif c in "'\"`":
-            quote = c
-        elif c == ";":
-            snippet = source[start:i].strip()
-            if snippet:
-                result.append((snippet, 1 + source.count("\n", 0, start + len(source[start:i]) - len(source[start:i].lstrip()))))
-            start = i + 1
-            start_line = line
-        if c == "\n":
-            line += 1
-            if start == i + 1:
-                start_line = line
-        i += 1
-    snippet = source[start:].strip()
-    if snippet:
-        result.append((snippet, 1 + source.count("\n", 0, start + len(source[start:]) - len(source[start:].lstrip()))))
-    return result
 
 
 def table_after(tokens: list[str], index: int) -> tuple[str | None, str | None, int]:
@@ -320,14 +212,13 @@ def scan_sql(sql: str, path: str, line: int, dynamic: bool = False) -> dict:
 
 def analyze(path: str, source: str) -> dict:
     n = {"sha256": digest(source), "nodes": [node("file", path)], "edges": [], "warnings": [], "queries": 0}
-    statements = ([(s, ln, False) for s, ln in sql_statements(source)] if path.endswith(".sql") else
-                  [(s, ln, dyn) for s, ln, dyn in scan_php_literals(source) if SQL_START.search(s)])
-    for sql, line, dynamic in statements:
-        result = scan_sql(sql, path, line, dynamic)
-        if result["nodes"]:
-            n["queries"] += 1
-        for key in ("nodes", "edges", "warnings"):
-            n[key].extend(result[key])
+    for adapter in adapters_for(path):
+        for st in adapter.statements(path, source):
+            result = scan_sql(st.sql, path, st.line, st.dynamic)
+            if result["nodes"]:
+                n["queries"] += 1
+            for key in ("nodes", "edges", "warnings"):
+                n[key].extend(result[key])
     return n
 
 
