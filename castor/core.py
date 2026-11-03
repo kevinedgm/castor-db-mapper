@@ -1,7 +1,10 @@
-"""Conservative, deterministic PHP/SQL evidence scanner. No project code execution."""
+"""Conservative, deterministic code-to-database evidence scanner. No project code execution.
+
+Language-specific extraction lives in castor/adapters; this module is language-agnostic."""
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import html
 import json
 import re
@@ -11,10 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.0"
-EXTENSIONS = {".php", ".phtml", ".inc", ".sql"}
+from .adapters import EXTENSIONS, adapters_for
+from .adapters import entries as entry_adapter
+from .adapters.dispatch import action_lines
+from .adapters.php import scan_php_literals  # noqa: F401  (re-export)
+from .adapters.sqlfile import sql_statements  # noqa: F401  (re-export)
+
+VERSION = "0.3.0"
+ANALYZER = 3  # bump when per-file analysis changes so cached records are rebuilt
 IGNORED = {".git", ".castor", "node_modules", "vendor", "bower_components", ".venv", "venv", "__pycache__", "dist", "build"}
-SQL_START = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE\s+TABLE|ALTER\s+TABLE|WITH|CALL)\b", re.I)
 IDENT = re.compile(r"^[A-Za-z_][\w$]*$")
 STOP = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "USING", "SET", "VALUES", "RETURNING", "FOR"}
 
@@ -77,116 +85,6 @@ def sql_tokens(sql: str) -> list[str]:
         out.append(c)
         i += 1
     return out
-
-
-def scan_php_literals(source: str) -> list[tuple[str, int, bool]]:
-    """Extract PHP single/double quoted string literals without interpreting code."""
-    items = []
-    i = 0
-    line = 1
-    php = False
-    while i < len(source):
-        if not php and source.startswith("<?", i):
-            php = True
-            i += 2
-            continue
-        if php and source.startswith("?>", i):
-            php = False
-            i += 2
-            continue
-        if not php:
-            if source[i] == "\n":
-                line += 1
-            i += 1
-            continue
-        if source.startswith("//", i) or source[i] == "#":
-            end = source.find("\n", i)
-            i = len(source) if end < 0 else end
-            continue
-        if source.startswith("/*", i):
-            end = source.find("*/", i + 2)
-            end = len(source) if end < 0 else end + 2
-            line += source[i:end].count("\n")
-            i = end
-            continue
-        if source[i] not in ("'", '"'):
-            if source[i] == "\n":
-                line += 1
-            i += 1
-            continue
-        quote = source[i]
-        start_line = line
-        i += 1
-        chars = []
-        while i < len(source):
-            c = source[i]
-            if c == "\\" and i + 1 < len(source):
-                chars.extend([c, source[i + 1]])
-                i += 2
-                continue
-            if c == quote:
-                i += 1
-                break
-            chars.append(c)
-            if c == "\n":
-                line += 1
-            i += 1
-        value = "".join(chars)
-        # PHP interpolates variables in double-quoted strings.
-        dynamic = quote == '"' and "$" in value
-        items.append((value, start_line, dynamic))
-    return items
-
-
-def sql_statements(source: str) -> list[tuple[str, int]]:
-    """Split .sql on semicolons outside strings and comments, tracking lines."""
-    result = []
-    start = 0
-    line = 1
-    start_line = 1
-    quote = None
-    comment = None
-    i = 0
-    while i < len(source):
-        c = source[i]
-        if comment == "line":
-            if c == "\n":
-                comment = None
-        elif comment == "block":
-            if source.startswith("*/", i):
-                comment = None
-                i += 2
-                continue
-        elif quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                if i + 1 < len(source) and source[i + 1] == quote:
-                    i += 2
-                    continue
-                quote = None
-        elif source.startswith("/*", i):
-            comment = "block"
-        elif source.startswith("--", i) and (i + 2 >= len(source) or source[i + 2].isspace()) or c == "#":
-            comment = "line"
-        elif c in "'\"`":
-            quote = c
-        elif c == ";":
-            snippet = source[start:i].strip()
-            if snippet:
-                result.append((snippet, 1 + source.count("\n", 0, start + len(source[start:i]) - len(source[start:i].lstrip()))))
-            start = i + 1
-            start_line = line
-        if c == "\n":
-            line += 1
-            if start == i + 1:
-                start_line = line
-        i += 1
-    snippet = source[start:].strip()
-    if snippet:
-        result.append((snippet, 1 + source.count("\n", 0, start + len(source[start:]) - len(source[start:].lstrip()))))
-    return result
 
 
 def table_after(tokens: list[str], index: int) -> tuple[str | None, str | None, int]:
@@ -319,15 +217,31 @@ def scan_sql(sql: str, path: str, line: int, dynamic: bool = False) -> dict:
 
 
 def analyze(path: str, source: str) -> dict:
-    n = {"sha256": digest(source), "nodes": [node("file", path)], "edges": [], "warnings": [], "queries": 0}
-    statements = ([(s, ln, False) for s, ln in sql_statements(source)] if path.endswith(".sql") else
-                  [(s, ln, dyn) for s, ln, dyn in scan_php_literals(source) if SQL_START.search(s)])
-    for sql, line, dynamic in statements:
-        result = scan_sql(sql, path, line, dynamic)
-        if result["nodes"]:
-            n["queries"] += 1
-        for key in ("nodes", "edges", "warnings"):
-            n[key].extend(result[key])
+    refs = [r._asdict() for r in entry_adapter.references(path, source)] if entry_adapter.applies(path) else []
+    has_queries = bool(adapters_for(path))
+    n = {"sha256": digest(source), "analyzer": ANALYZER, "nodes": [node("file", path)] if (has_queries or refs) else [],
+         "edges": [], "warnings": [], "queries": 0, "refs": refs, "actions": {}}
+    for adapter in adapters_for(path):
+        query_lines = []
+        for st in adapter.statements(path, source):
+            result = scan_sql(st.sql, path, st.line, st.dynamic)
+            if result["nodes"]:
+                n["queries"] += 1
+                query_lines.append((result["nodes"][0]["id"], st.line))
+            for key in ("nodes", "edges", "warnings"):
+                n[key].extend(result[key])
+        if hasattr(adapter, "structure"):
+            struct = adapter.structure(path, source)
+            for name, spans in action_lines(struct).items():
+                aid = f"action:{path}#{name}"
+                act = struct["actions"][name]
+                n["nodes"].append(node("action", f"{path}#{name}", line=act["line"], handlers=act["reach"]))
+                ev = {"file": path, "line": act["line"], "kind": "CODE_OBSERVED"}
+                n["edges"].append(edge(f"file:{path}", aid, "HAS_ACTION", ev))
+                n["actions"][name] = act["line"]
+                for qid, line in query_lines:
+                    if any(a <= line <= b for a, b in spans):
+                        n["edges"].append(edge(aid, qid, "RUNS_QUERY", {**ev, "line": line}))
     return n
 
 
@@ -369,13 +283,62 @@ def build_graph(records: dict) -> dict:
         warnings.extend(record["warnings"])
     for e in infer_relationships(list(nodes.values()), list(edges.values())):
         edges[e["id"]] = e
+    for e, warning in resolve_references(records):
+        if e:
+            edges[e["id"]] = e
+        if warning:
+            warnings.append(warning)
     return {"version": 1, "nodes": sorted(nodes.values(), key=lambda x: x["id"]), "edges": sorted(edges.values(), key=lambda x: x["id"]), "warnings": warnings}
+
+
+def resolve_references(records: dict):
+    """Link raw endpoint references to scanned files: root-relative, then caller-relative, then unique suffix."""
+    known = set(records)
+    by_name: dict[str, list[str]] = {}
+    for k in known:
+        by_name.setdefault(k.rsplit("/", 1)[-1], []).append(k)
+    for caller, record in records.items():
+        base = caller.rsplit("/", 1)[0] if "/" in caller else ""
+        for ref in record.get("refs", []):
+            raw = ref["target"]
+            root_rel = ("root", posixpath.normpath(raw.lstrip("/")))
+            if ref["kind"] == "include":  # `__DIR__ . '/db.php'` or 'db.php': caller directory first
+                candidates = [("relative", posixpath.normpath(posixpath.join(base, raw.lstrip("/")))), root_rel]
+            else:  # front-end URLs in this kind of app are usually relative to the web root
+                candidates = [root_rel, ("relative", posixpath.normpath(posixpath.join(base, raw)))]
+            target, how = None, None
+            for how_, cand in candidates:
+                if cand in known:
+                    target, how = cand, how_
+                    break
+            if not target:
+                # Deployment prefixes (`/app/mod/x.php`, `${origin}/app/x.php`): drop leading
+                # segments until exactly one scanned file ends with the remaining path.
+                parts = [p for p in posixpath.normpath(raw.split("}")[-1]).split("/") if p not in ("", ".", "..")]
+                for i in range(len(parts)):
+                    tail = "/".join(parts[i:])
+                    matches = [k for k in by_name.get(parts[-1], []) if k == tail or k.endswith("/" + tail)]
+                    if len(matches) == 1:
+                        target, how = matches[0], "suffix"
+                        break
+                    if matches:  # ambiguous: a shorter tail would only be more ambiguous
+                        break
+            ev = {"file": caller, "line": ref["line"], "kind": "CODE_OBSERVED"}
+            if not target or target == caller:
+                if not target:
+                    yield None, {"path": caller, "line": ref["line"], "reason": f"Endpoint reference not resolved: {raw}"}
+                continue
+            kind = "INCLUDES" if ref["kind"] == "include" else "CALLS_ENDPOINT"
+            action = ref.get("action")
+            yield edge(f"file:{caller}", f"file:{target}", kind, ev, via=ref["via"], resolution=how, raw=raw, action=action), None
+            if kind == "CALLS_ENDPOINT" and action and action in records[target].get("actions", {}):
+                yield edge(f"file:{caller}", f"action:{target}#{action}", "CALLS_ACTION", ev, via=ref["via"]), None
 
 
 def files_to_scan(root: Path) -> list[Path]:
     paths = []
     for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in EXTENSIONS or any(piece in IGNORED for piece in p.relative_to(root).parts):
+        if not p.is_file() or p.suffix.lower() not in EXTENSIONS | entry_adapter.ENTRY_EXTENSIONS or any(piece in IGNORED for piece in p.relative_to(root).parts):
             continue
         paths.append(p)
     return sorted(paths)
@@ -399,7 +362,7 @@ def scan(root: Path, output: Path | None = None, full: bool = False) -> dict:
         except OSError:
             continue
         sha = digest(source)
-        if rel in old and old[rel].get("sha256") == sha:
+        if rel in old and old[rel].get("sha256") == sha and old[rel].get("analyzer") == ANALYZER:
             records[rel] = old[rel]
             reused += 1
         else:
@@ -461,6 +424,82 @@ def subgraph(output: Path, term: str, depth: int = 2, limit: int = 120) -> dict:
         return {"term": term, "seeds": seeds, "nodes": nodes, "edges": list(edges.values())}
 
 
+def endpoints(output: Path, term: str = "", include_depth: int = 3) -> dict:
+    """Endpoint map: server file -> who calls it -> actions -> tables read/written (following includes)."""
+    g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    out_edges: dict[str, list[dict]] = {}
+    for e in g["edges"]:
+        out_edges.setdefault(e["source"], []).append(e)
+    callers: dict[str, list[dict]] = {}
+    for e in g["edges"]:
+        if e["type"] == "CALLS_ENDPOINT":
+            callers.setdefault(e["target"], []).append({"file": e["evidence"]["file"], "line": e["evidence"]["line"],
+                                                        "via": e["meta"].get("via"), "action": e["meta"].get("action")})
+
+    def add_query(found: dict, qid: str, origin: str) -> None:
+        for q in out_edges.get(qid, []):
+            if q["type"] in {"READ", "WRITE"}:
+                slot = found.setdefault(q["target"].split(":", 1)[1], {"ops": set(), "from": set()})
+                slot["ops"].add(q["type"])
+                slot["from"].add(origin)
+
+    def fmt(found: dict) -> dict:
+        return {t: {"ops": sorted(m["ops"]), "from": sorted(m["from"])} for t, m in sorted(found.items())}
+
+    def tables(fid: str) -> tuple[dict, list[str]]:
+        found: dict[str, dict] = {}
+        seen, frontier, via = {fid}, [fid], []
+        for depth in range(include_depth + 1):
+            nxt = []
+            for f in frontier:
+                for e in out_edges.get(f, []):
+                    if e["type"] == "CONTAINS_QUERY":
+                        add_query(found, e["target"], f.split(":", 1)[1])
+                    elif e["type"] == "INCLUDES" and e["target"] not in seen and depth < include_depth:
+                        seen.add(e["target"])
+                        nxt.append(e["target"])
+                        via.append(e["target"].split(":", 1)[1])
+            frontier = nxt
+        return fmt(found), via
+
+    def actions(fid: str, calls: list[dict], includes: list[str]) -> list[dict]:
+        # A thin endpoint may `require` the file that really dispatches (compatibility shims).
+        out, seen_names = [], set()
+        for e in [x for f in [fid] + [f"file:{i}" for i in includes] for x in out_edges.get(f, [])]:
+            if e["type"] != "HAS_ACTION" or e["target"].split("#", 1)[1] in seen_names:
+                continue
+            seen_names.add(e["target"].split("#", 1)[1])
+            name = e["target"].split("#", 1)[1]
+            found: dict[str, dict] = {}
+            for r in out_edges.get(e["target"], []):
+                if r["type"] == "RUNS_QUERY":
+                    add_query(found, r["target"], f'{r["evidence"]["file"]}:{r["evidence"]["line"]}')
+            out.append({"action": name, "file": e["evidence"]["file"], "line": e["evidence"]["line"],
+                        "callers": [{k: c[k] for k in ("file", "line", "via")} for c in calls if c["action"] == name],
+                        "tables": fmt(found)})
+        return sorted(out, key=lambda a: (a["file"] != fid.split(":", 1)[1], a["file"], a["line"]))
+
+    result = []
+    for fid, calls in callers.items():
+        tbl, inc = tables(fid)
+        acts = actions(fid, calls, inc)
+        path = fid.split(":", 1)[1]
+        t = term.lower()
+        if t and t not in path.lower() and not any(t in x for x in tbl) and not any(t in a["action"].lower() for a in acts):
+            continue
+        known = {a["action"] for a in acts}
+        result.append({"endpoint": path,
+                       "callers": sorted(calls, key=lambda c: (c["file"], c["line"])),
+                       "tables": tbl, "via_includes": inc, "actions": acts,
+                       "unmatched_actions": sorted({c["action"] for c in calls if c["action"] and c["action"] not in known})})
+    result.sort(key=lambda r: (-len(r["callers"]), r["endpoint"]))
+    return {"term": term, "count": len(result), "endpoints": result,
+            "limits": ["Actions come from `switch` on an action-like parameter (or top-level switch); if/elseif chains and routers are not split",
+                       "Action tables include same-file functions reachable from the case, not functions in other files",
+                       "Front-end action is read from the call line or the following lines; URLs built at runtime are not resolved",
+                       "Tables come only from statically resolved SQL"]}
+
+
 def report(output: Path) -> dict:
     p = output / "manifest.json"
     if not p.exists():
@@ -469,6 +508,85 @@ def report(output: Path) -> dict:
     g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
     m["unresolved"] = g["warnings"][:150]
     return m
+
+
+def relations_map(output: Path) -> dict:
+    """Table-level relationship map: one link per table pair, with column pairs and evidence.
+
+    Schema-qualified names (`db.table`) are merged into `table` for the map.
+    """
+    g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    bare = lambda t: t.split(".")[-1]  # noqa: E731
+    query_file = {e["target"]: e["source"].split(":", 1)[1] for e in g["edges"] if e["type"] == "CONTAINS_QUERY"}
+    tables: dict[str, dict] = {}
+
+    def table(name: str) -> dict:
+        return tables.setdefault(bare(name), {"name": bare(name), "reads": 0, "writes": 0, "files": set(), "cols": set()})
+
+    for n in g["nodes"]:
+        if n["type"] == "table":
+            table(n["label"])
+        elif n["type"] == "column":
+            t, c = n["label"].rsplit(".", 1)
+            table(t)["cols"].add(c)
+    for e in g["edges"]:
+        if e["type"] in {"READ", "WRITE"}:
+            t = table(e["target"].split(":", 1)[1])
+            t["reads" if e["type"] == "READ" else "writes"] += 1
+            if e["source"] in query_file:
+                t["files"].add(query_file[e["source"]])
+    rank = {"DECLARED": 3, "CODE_OBSERVED": 2, "INFERRED": 1}
+    links: dict[tuple, dict] = {}
+    for e in g["edges"]:
+        if e["type"] not in {"RELATES_TO", "POSSIBLE_RELATION"}:
+            continue
+        kind = e["evidence"].get("kind", "INFERRED")
+        src = e["source"].split(":", 1)[1]
+        dst = e["target"].split(":", 1)[1]
+        ta, ca = src.rsplit(".", 1)
+        if e["target"].startswith("table:"):
+            tb, cb = dst, "?"
+        else:
+            tb, cb = dst.rsplit(".", 1)
+        ta, tb = bare(ta), bare(tb)
+        if ta == tb:
+            continue
+        if (ta, ca) > (tb, cb):
+            ta, ca, tb, cb = tb, cb, ta, ca
+        link = links.setdefault((ta, tb), {"a": ta, "b": tb, "kind": kind, "n": 0, "files": set(), "pairs": {}, "ev": []})
+        if rank[kind] > rank[link["kind"]]:
+            link["kind"] = kind
+        pair = link["pairs"].setdefault((ca, cb), {"a": ca, "b": cb, "kinds": set(), "n": 0})
+        pair["kinds"].add(kind)
+        if kind != "INFERRED":
+            pair["n"] += 1
+            link["n"] += 1
+            link["files"].add(e["evidence"]["file"])
+            if len(link["ev"]) < 60:
+                link["ev"].append({"file": e["evidence"]["file"], "line": e["evidence"].get("line"), "kind": kind,
+                                   "pair": f"{ta}.{ca} = {tb}.{cb}"})
+    # Show evidence from live-looking files first (backups and dated copies last).
+    stale = re.compile(r"(old|olds|respaldo|backup|copia|_v\d|\d{6}|_viejo|_demo|[-_]x\.|_\.php)", re.I)
+    for lk in links.values():
+        lk["ev"] = sorted(lk["ev"], key=lambda e: (bool(stale.search(e["file"])), e["file"].count("/"), e["file"]))[:8]
+    table_list = [{**t, "files": len(t["files"]), "cols": sorted(t["cols"])} for t in sorted(tables.values(), key=lambda t: t["name"])]
+    link_list = []
+    for lk in sorted(links.values(), key=lambda x: (-x["n"], x["a"], x["b"])):
+        pairs = sorted(({**p, "kinds": sorted(p["kinds"], key=lambda k: -rank[k])} for p in lk["pairs"].values()), key=lambda p: -p["n"])
+        link_list.append({**lk, "files": len(lk["files"]), "pairs": pairs})
+    m = json.loads((output / "manifest.json").read_text(encoding="utf-8")) if (output / "manifest.json").exists() else {}
+    return {"generated_at": m.get("generated_at"), "root": Path(m.get("root", "")).name, "tables": table_list, "links": link_list}
+
+
+def export_relations_html(output: Path) -> Path:
+    data = relations_map(output)
+    template = (Path(__file__).parent / "templates" / "relations.html").read_text(encoding="utf-8")
+    payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+    dest = output / "relations.html"
+    page = template.replace("__CASTOR_DATA__", payload)
+    head = '<!doctype html>\n<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+    dest.write_text(head + page.replace("<header>", "</head><body><header>", 1) + "</body></html>\n", encoding="utf-8")
+    return dest
 
 
 def export_html(output: Path, term: str = "", limit: int = 150) -> Path:

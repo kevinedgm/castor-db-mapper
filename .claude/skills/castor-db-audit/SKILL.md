@@ -9,5 +9,6 @@ description: "Inspect evidence quality, potential orphan relationships, unsuppor
 2. Compare `DECLARED` links against `CODE_OBSERVED`; do not assume either is correct at runtime without schema/environment verification.
 3. Identify `INFERRED` links from naming similarity and recommend source inspection or authorized read-only integrity checks.
 4. Detect files with zero parsed queries that appear to use indirect repositories, heredoc statements, or an unsupported language. Classify as coverage gaps.
-5. Report exactly which relation is uncertain, why, its source paths, consequences and safe verification method.
-6. Never generate automatic DDL changes or run write queries. This is a diagnosis, not a migration.
+5. Run `endpoints` and list `unmatched_actions`: actions the front end sends that the server does not dispatch statically. Each is a dead call, a removed handler or unsupported dispatch; confirm by reading the cited caller and endpoint.
+6. Report exactly which relation is uncertain, why, its source paths, consequences and safe verification method.
+7. Never generate automatic DDL changes or run write queries. This is a diagnosis, not a migration.

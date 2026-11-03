@@ -12,7 +12,7 @@ Translate a plain-language API request into a specific implementable design grou
 
 ## Workflow
 1. Read project architecture and access rules first. Detect runtime, framework, active routes and data access style; do not impose a foreign framework.
-2. Refresh the index using `python -m castor scan <project>`, then run focused `query` calls for business nouns in the requirement. The catalog is a locator, not a source of truth independent of source code.
+2. Refresh the index using `python -m castor scan <project>`, then run `endpoints "<noun>"` to find existing endpoints, their callers and tables, and focused `query` calls for business nouns in the requirement. An endpoint listed there is a reuse candidate; its granularity is the file, so read it to find in-file dispatch. The catalog is a locator, not a source of truth independent of source code.
 3. Inspect exact cited PHP/SQL and routing files to establish all relevant table names, keys, joins, business states, access controls, transaction boundaries and existing endpoints.
 4. For every required field, classify: **existing/reusable**, **existing/needs adaptation**, **not located**, **missing confirmed**, **unknown**. Never label "missing" merely because the scanner did not find it.
 5. Design route, HTTP method, auth/authorization, input contract, output schema, error codes, pagination, filtering, transactions, validation, privacy, audit trail, and backwards compatibility from project conventions.

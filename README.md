@@ -1,8 +1,10 @@
 # Castor DB Mapper
 
-**Portable backend/database knowledge graph for Claude Code.** Analyze PHP/MySQL repositories, keep a local searchable evidence index, identify implicit table relationships, and plan endpoints based on existing code.
+**Portable backend/database knowledge graph for Claude Code.** Analyze repositories that talk to SQL databases, keep a local searchable evidence index, identify implicit table relationships, map which front-end code calls which endpoint and which tables each endpoint touches, and plan endpoints based on existing code.
 
-> **Status: v0.1 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
+The core is language-agnostic; language support lives in small adapters (`castor/adapters/`). v0.2 ships adapters for PHP, `.sql` files and endpoint references from JS/TS/Vue/HTML/PHP.
+
+> **Status: v0.3 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
 
 ## Quick start
 
@@ -14,6 +16,8 @@ python -m castor scan /path/to/other-project
 python -m castor --output /path/to/other-project/.castor report
 python -m castor --output /path/to/other-project/.castor query "muestras" --depth 2
 python -m castor --output /path/to/other-project/.castor visualize --term "muestras"
+python -m castor --output /path/to/other-project/.castor endpoints "muestras"
+python -m castor --output /path/to/other-project/.castor map   # -> .castor/relations.html
 ```
 
 Open `/path/to/other-project/.castor/graph.html` in a browser. It is an offline HTML graph of the relevant subgraph with node filtering and evidence details. Scan again after code changes; unchanged files are reused by SHA-256.
@@ -24,7 +28,7 @@ Open `/path/to/other-project/.castor/graph.html` in a browser. It is an offline 
 python install.py /path/to/other-project
 ```
 
-This copies **two agents** and **five skills** under the target `.claude/` directory. Existing files are never overwritten unless `--force` is explicitly supplied. You can also copy them to your global Claude Code configuration as appropriate. For projects without Castor source installed, call the scanner from the Castor checkout (`cd /path/to/castor-db-mapper` and run `python -m castor scan /your/project`).
+This copies **two agents** and **six skills** under the target `.claude/` directory. Existing files are never overwritten unless `--force` is explicitly supplied. You can also copy them to your global Claude Code configuration as appropriate. For projects without Castor source installed, call the scanner from the Castor checkout (`cd /path/to/castor-db-mapper` and run `python -m castor scan /your/project`).
 
 Example in Claude Code:
 
@@ -41,6 +45,20 @@ Example in Claude Code:
 - Recognized `CREATE TABLE ... FOREIGN KEY ... REFERENCES ...` as **DECLARED** evidence from the source file.
 - Optional **INFERRED** low-confidence table associations from `_id` / `id_` naming.
 - Unresolved statements, source hashes, bounded graph queries and HTML export.
+- **Endpoint map** (`endpoints`): string literals naming a server file (`axios.get('mod/api.php')`, `fetch(...)`, `href`, `include/require`) become `CALLS_ENDPOINT` / `INCLUDES` edges, resolved only against files that exist in the repo. For each endpoint you get its callers (`file:line`, mechanism) and the tables it reads/writes, following includes, with the file each table comes from.
+- **Actions inside an endpoint**: files that dispatch with `switch ($_POST['action']) { case 'x': ... }` are split into actions. Each action lists the front-end calls that send it (`action: 'x'`, `?action=x`, payload built just before the call) and the tables reached from its `case` body and the same-file functions it calls. `unmatched_actions` lists actions the front end sends but the server does not dispatch statically: dead calls, removed handlers or `if/elseif` dispatch worth checking.
+
+## Table relationship map
+
+`python -m castor --output PROJECT/.castor map` writes `relations.html`, an offline interactive map with one line per pair of tables that the code compares column to column, even when no foreign key exists. Line color tells the evidence (observed in code, declared FK, inferred by name), thickness tells how many queries use it. Selecting a table lists every related table, the exact column pairs and sample `file:line` evidence (live files first, backups last). Schema-qualified names (`db.table`) are merged. Filters hide relation kinds or weak links (minimum number of queries).
+
+## Building a module
+
+The `castor-module-build` skill turns the evidence into a backend module: it locates the domain with `endpoints`/`query`, reads the project's own architecture rules, designs a contract, implements it in layers (api → service → repository), tests it (unit, disposable-DB integration, HTTP with the real guard) and writes the contract and an improvements report separating facts from proposals. First run: `nn-usuarios` in NisaNabani.
+
+## Adding a language
+
+Write a class with `name`, `extensions` and `statements(path, source) -> list[Statement]` in `castor/adapters/`, and append it to `QUERY_ADAPTERS` in `castor/adapters/__init__.py`. The SQL analysis, graph, index and endpoint map are reused unchanged. Endpoint file types are listed in `ENDPOINT_SUFFIXES` (`castor/adapters/entries.py`).
 
 **Important:** `DECLARED` indicates an FK found in the SQL source, **not** proof that the live database has the constraint. All graphs describe what the scanner observed, not necessarily every behavior of the running system. See [architecture and limits](docs/ARCHITECTURE.md).
 
@@ -67,4 +85,4 @@ Tests exercise missing-FK joins, explicit FK declarations, read/write operations
 
 ## Roadmap
 
-Better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.1.
+Query adapters for Python/JS/Java/Go string SQL, schema adapters for migrations and ORM models (Prisma, Django, Eloquent), `if/elseif` and router-based dispatch, cross-file handler resolution, better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.3.

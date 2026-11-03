@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "castor-db-mapper"
-version = "0.1.0"
-description = "Persistent evidence graph of PHP/SQL backend database usage"
+version = "0.3.0"
+description = "Persistent evidence graph linking source code, endpoints and database tables"
 requires-python = ">=3.10"
 dependencies = []
 
@@ -15,3 +15,6 @@ castor = "castor.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["castor*"]
+
+[tool.setuptools.package-data]
+castor = ["templates/*.html"]

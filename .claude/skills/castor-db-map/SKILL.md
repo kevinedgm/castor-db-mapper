@@ -11,4 +11,6 @@ description: "Look up tables, SQL operations, implicit relationships, writers/re
 4. If an edge has `evidence.kind=DECLARED`, it was recognized in SQL DDL; `CODE_OBSERVED` signals a query association, `INFERRED` is merely a naming hypothesis.
 5. When a result is not located, check coverage and perform a bounded code search before declaring that it doesn't exist.
 
+To give a person a visual overview, run `python -m castor --output /path/to/project/.castor map` and point them to `.castor/relations.html`.
+
 For relation questions, report source/target, direction where known, proof, certainty, and unresolved cardinality. Do not infer one-to-many solely from names.
