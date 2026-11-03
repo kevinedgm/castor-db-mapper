@@ -84,13 +84,43 @@ class EndpointMapTests(unittest.TestCase):
             scan(root)
             result = {e["endpoint"]: e for e in endpoints(root / ".castor")["endpoints"]}
             api = result["mod/api.php"]
-            self.assertEqual(api["callers"], [{"file": "mod/index.js", "line": 1, "via": "axios"}])
+            self.assertEqual(api["callers"], [{"file": "mod/index.js", "line": 1, "via": "axios", "action": None}])
             self.assertEqual(api["tables"]["muestras"], {"ops": ["READ"], "from": ["mod/repo.php"]})
             self.assertEqual(api["via_includes"], ["mod/repo.php"])
             # deployment prefix /app/ is stripped by unique-suffix resolution
             self.assertEqual(result["mod/legacy.php"]["tables"]["pagos"]["ops"], ["WRITE"])
             warnings = json.loads((root / ".castor" / "graph.json").read_text())["warnings"]
             self.assertTrue(any("mod/missing.php" in w["reason"] for w in warnings))
+
+
+class DispatchTests(unittest.TestCase):
+    SERVER = """<?php
+if (isset($_POST["action"])) {
+  switch ($_POST["action"]) {
+    case "lista": lista(); break;
+    case "guarda":
+      $q = "INSERT INTO pagos (id) VALUES (?)";
+      break;
+  }
+}
+function lista() { $s = "SELECT * FROM muestras"; helper(); }
+function helper() { $t = "SELECT * FROM clientes"; }
+function unrelated() { switch ($tipo) { case 'x': $u = "DELETE FROM logs"; break; } }
+"""
+
+    def test_actions_split_endpoint_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "api.php").write_text(self.SERVER)
+            (root / "app.js").write_text("$.ajax({\n  url: 'api.php',\n  data: {action: 'lista'}\n});\nfetch('api.php?action=guarda')")
+            scan(root)
+            ep = endpoints(root / ".castor")["endpoints"][0]
+            acts = {a["action"]: a for a in ep["actions"]}
+            self.assertEqual(set(acts), {"lista", "guarda"})  # switch on $tipo inside a function is not dispatch
+            self.assertEqual(set(acts["lista"]["tables"]), {"muestras", "clientes"})  # follows helper()
+            self.assertEqual(acts["guarda"]["tables"], {"pagos": {"ops": ["WRITE"], "from": ["api.php:6"]}})
+            self.assertEqual([c["line"] for c in acts["lista"]["callers"]], [2])
+            self.assertEqual([c["line"] for c in acts["guarda"]["callers"]], [5])
 
 
 if __name__ == "__main__":

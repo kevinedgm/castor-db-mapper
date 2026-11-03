@@ -16,11 +16,12 @@ from typing import Any
 
 from .adapters import EXTENSIONS, adapters_for
 from .adapters import entries as entry_adapter
+from .adapters.dispatch import action_lines
 from .adapters.php import scan_php_literals  # noqa: F401  (re-export)
 from .adapters.sqlfile import sql_statements  # noqa: F401  (re-export)
 
-VERSION = "0.2.0"
-ANALYZER = 2  # bump when per-file analysis changes so cached records are rebuilt
+VERSION = "0.3.0"
+ANALYZER = 3  # bump when per-file analysis changes so cached records are rebuilt
 IGNORED = {".git", ".castor", "node_modules", "vendor", "bower_components", ".venv", "venv", "__pycache__", "dist", "build"}
 IDENT = re.compile(r"^[A-Za-z_][\w$]*$")
 STOP = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "USING", "SET", "VALUES", "RETURNING", "FOR"}
@@ -219,14 +220,28 @@ def analyze(path: str, source: str) -> dict:
     refs = [r._asdict() for r in entry_adapter.references(path, source)] if entry_adapter.applies(path) else []
     has_queries = bool(adapters_for(path))
     n = {"sha256": digest(source), "analyzer": ANALYZER, "nodes": [node("file", path)] if (has_queries or refs) else [],
-         "edges": [], "warnings": [], "queries": 0, "refs": refs}
+         "edges": [], "warnings": [], "queries": 0, "refs": refs, "actions": {}}
     for adapter in adapters_for(path):
+        query_lines = []
         for st in adapter.statements(path, source):
             result = scan_sql(st.sql, path, st.line, st.dynamic)
             if result["nodes"]:
                 n["queries"] += 1
+                query_lines.append((result["nodes"][0]["id"], st.line))
             for key in ("nodes", "edges", "warnings"):
                 n[key].extend(result[key])
+        if hasattr(adapter, "structure"):
+            struct = adapter.structure(path, source)
+            for name, spans in action_lines(struct).items():
+                aid = f"action:{path}#{name}"
+                act = struct["actions"][name]
+                n["nodes"].append(node("action", f"{path}#{name}", line=act["line"], handlers=act["reach"]))
+                ev = {"file": path, "line": act["line"], "kind": "CODE_OBSERVED"}
+                n["edges"].append(edge(f"file:{path}", aid, "HAS_ACTION", ev))
+                n["actions"][name] = act["line"]
+                for qid, line in query_lines:
+                    if any(a <= line <= b for a, b in spans):
+                        n["edges"].append(edge(aid, qid, "RUNS_QUERY", {**ev, "line": line}))
     return n
 
 
@@ -314,7 +329,10 @@ def resolve_references(records: dict):
                     yield None, {"path": caller, "line": ref["line"], "reason": f"Endpoint reference not resolved: {raw}"}
                 continue
             kind = "INCLUDES" if ref["kind"] == "include" else "CALLS_ENDPOINT"
-            yield edge(f"file:{caller}", f"file:{target}", kind, ev, via=ref["via"], resolution=how, raw=raw), None
+            action = ref.get("action")
+            yield edge(f"file:{caller}", f"file:{target}", kind, ev, via=ref["via"], resolution=how, raw=raw, action=action), None
+            if kind == "CALLS_ENDPOINT" and action and action in records[target].get("actions", {}):
+                yield edge(f"file:{caller}", f"action:{target}#{action}", "CALLS_ACTION", ev, via=ref["via"]), None
 
 
 def files_to_scan(root: Path) -> list[Path]:
@@ -407,7 +425,7 @@ def subgraph(output: Path, term: str, depth: int = 2, limit: int = 120) -> dict:
 
 
 def endpoints(output: Path, term: str = "", include_depth: int = 3) -> dict:
-    """Endpoint map: server file -> who calls it -> tables it reads/writes (following includes)."""
+    """Endpoint map: server file -> who calls it -> actions -> tables read/written (following includes)."""
     g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
     out_edges: dict[str, list[dict]] = {}
     for e in g["edges"]:
@@ -415,7 +433,18 @@ def endpoints(output: Path, term: str = "", include_depth: int = 3) -> dict:
     callers: dict[str, list[dict]] = {}
     for e in g["edges"]:
         if e["type"] == "CALLS_ENDPOINT":
-            callers.setdefault(e["target"], []).append({"file": e["evidence"]["file"], "line": e["evidence"]["line"], "via": e["meta"].get("via")})
+            callers.setdefault(e["target"], []).append({"file": e["evidence"]["file"], "line": e["evidence"]["line"],
+                                                        "via": e["meta"].get("via"), "action": e["meta"].get("action")})
+
+    def add_query(found: dict, qid: str, origin: str) -> None:
+        for q in out_edges.get(qid, []):
+            if q["type"] in {"READ", "WRITE"}:
+                slot = found.setdefault(q["target"].split(":", 1)[1], {"ops": set(), "from": set()})
+                slot["ops"].add(q["type"])
+                slot["from"].add(origin)
+
+    def fmt(found: dict) -> dict:
+        return {t: {"ops": sorted(m["ops"]), "from": sorted(m["from"])} for t, m in sorted(found.items())}
 
     def tables(fid: str) -> tuple[dict, list[str]]:
         found: dict[str, dict] = {}
@@ -425,30 +454,50 @@ def endpoints(output: Path, term: str = "", include_depth: int = 3) -> dict:
             for f in frontier:
                 for e in out_edges.get(f, []):
                     if e["type"] == "CONTAINS_QUERY":
-                        for q in out_edges.get(e["target"], []):
-                            if q["type"] in {"READ", "WRITE"}:
-                                slot = found.setdefault(q["target"].split(":", 1)[1], {"ops": set(), "from": set()})
-                                slot["ops"].add(q["type"])
-                                slot["from"].add(f.split(":", 1)[1])
+                        add_query(found, e["target"], f.split(":", 1)[1])
                     elif e["type"] == "INCLUDES" and e["target"] not in seen and depth < include_depth:
                         seen.add(e["target"])
                         nxt.append(e["target"])
                         via.append(e["target"].split(":", 1)[1])
             frontier = nxt
-        return {t: {"ops": sorted(m["ops"]), "from": sorted(m["from"])} for t, m in sorted(found.items())}, via
+        return fmt(found), via
+
+    def actions(fid: str, calls: list[dict], includes: list[str]) -> list[dict]:
+        # A thin endpoint may `require` the file that really dispatches (compatibility shims).
+        out, seen_names = [], set()
+        for e in [x for f in [fid] + [f"file:{i}" for i in includes] for x in out_edges.get(f, [])]:
+            if e["type"] != "HAS_ACTION" or e["target"].split("#", 1)[1] in seen_names:
+                continue
+            seen_names.add(e["target"].split("#", 1)[1])
+            name = e["target"].split("#", 1)[1]
+            found: dict[str, dict] = {}
+            for r in out_edges.get(e["target"], []):
+                if r["type"] == "RUNS_QUERY":
+                    add_query(found, r["target"], f'{r["evidence"]["file"]}:{r["evidence"]["line"]}')
+            out.append({"action": name, "file": e["evidence"]["file"], "line": e["evidence"]["line"],
+                        "callers": [{k: c[k] for k in ("file", "line", "via")} for c in calls if c["action"] == name],
+                        "tables": fmt(found)})
+        return sorted(out, key=lambda a: (a["file"] != fid.split(":", 1)[1], a["file"], a["line"]))
 
     result = []
     for fid, calls in callers.items():
         tbl, inc = tables(fid)
+        acts = actions(fid, calls, inc)
         path = fid.split(":", 1)[1]
-        if term and term.lower() not in path.lower() and not any(term.lower() in t for t in tbl):
+        t = term.lower()
+        if t and t not in path.lower() and not any(t in x for x in tbl) and not any(t in a["action"].lower() for a in acts):
             continue
-        result.append({"endpoint": path, "callers": sorted(calls, key=lambda c: (c["file"], c["line"])),
-                       "tables": tbl, "via_includes": inc})
+        known = {a["action"] for a in acts}
+        result.append({"endpoint": path,
+                       "callers": sorted(calls, key=lambda c: (c["file"], c["line"])),
+                       "tables": tbl, "via_includes": inc, "actions": acts,
+                       "unmatched_actions": sorted({c["action"] for c in calls if c["action"] and c["action"] not in known})})
     result.sort(key=lambda r: (-len(r["callers"]), r["endpoint"]))
     return {"term": term, "count": len(result), "endpoints": result,
-            "limits": ["Endpoint granularity is the file; in-file dispatch (?accion=...) is not split",
-                       "URLs built at runtime are not resolved", "Tables come only from statically resolved SQL"]}
+            "limits": ["Actions come from `switch` on an action-like parameter (or top-level switch); if/elseif chains and routers are not split",
+                       "Action tables include same-file functions reachable from the case, not functions in other files",
+                       "Front-end action is read from the call line or the following lines; URLs built at runtime are not resolved",
+                       "Tables come only from statically resolved SQL"]}
 
 
 def report(output: Path) -> dict:

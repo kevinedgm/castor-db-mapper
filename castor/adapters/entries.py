@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
+from .dispatch import front_action
+
 ENTRY_EXTENSIONS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".html", ".htm", ".php", ".phtml", ".inc"}
 ENDPOINT_SUFFIXES = (".php",)  # server-side file types that can be endpoints; extend per stack
 MAX_BYTES = 512_000  # skip bundles/minified files: they duplicate evidence and are slow
@@ -29,13 +31,15 @@ class Ref(NamedTuple):
     line: int
     kind: str  # "include" (server-side composition) | "call" (HTTP/navigation)
     via: str  # detected mechanism, e.g. axios, fetch, href; "string" if unknown
+    action: str | None = None  # action parameter sent with the call (`action: 'x'`, `?action=x`), if visible
 
 
 def references(path: str, source: str) -> list[Ref]:
     if len(source) > MAX_BYTES or ".min." in path:
         return []
     out = []
-    for number, text in enumerate(source.split("\n"), 1):
+    lines = source.split("\n")
+    for number, text in enumerate(lines, 1):
         if ".php" not in text or text.lstrip().startswith(_COMMENT_START):
             continue
         for m in _LITERAL.finditer(text):
@@ -47,7 +51,7 @@ def references(path: str, source: str) -> list[Ref]:
                 out.append(Ref(raw, number, "include", "include"))
             else:
                 via = _VIA.findall(before)
-                out.append(Ref(raw, number, "call", via[-1].lower() if via else "string"))
+                out.append(Ref(raw, number, "call", via[-1].lower() if via else "string", front_action(lines, number - 1)))
     return out
 
 

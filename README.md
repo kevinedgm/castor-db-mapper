@@ -4,7 +4,7 @@
 
 The core is language-agnostic; language support lives in small adapters (`castor/adapters/`). v0.2 ships adapters for PHP, `.sql` files and endpoint references from JS/TS/Vue/HTML/PHP.
 
-> **Status: v0.2 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
+> **Status: v0.3 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
 
 ## Quick start
 
@@ -45,6 +45,7 @@ Example in Claude Code:
 - Optional **INFERRED** low-confidence table associations from `_id` / `id_` naming.
 - Unresolved statements, source hashes, bounded graph queries and HTML export.
 - **Endpoint map** (`endpoints`): string literals naming a server file (`axios.get('mod/api.php')`, `fetch(...)`, `href`, `include/require`) become `CALLS_ENDPOINT` / `INCLUDES` edges, resolved only against files that exist in the repo. For each endpoint you get its callers (`file:line`, mechanism) and the tables it reads/writes, following includes, with the file each table comes from.
+- **Actions inside an endpoint**: files that dispatch with `switch ($_POST['action']) { case 'x': ... }` are split into actions. Each action lists the front-end calls that send it (`action: 'x'`, `?action=x`, payload built just before the call) and the tables reached from its `case` body and the same-file functions it calls. `unmatched_actions` lists actions the front end sends but the server does not dispatch statically: dead calls, removed handlers or `if/elseif` dispatch worth checking.
 
 ## Adding a language
 
@@ -75,4 +76,4 @@ Tests exercise missing-FK joins, explicit FK declarations, read/write operations
 
 ## Roadmap
 
-Query adapters for Python/JS/Java/Go string SQL, schema adapters for migrations and ORM models (Prisma, Django, Eloquent), per-action endpoint dispatch (`?accion=`), better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.2.
+Query adapters for Python/JS/Java/Go string SQL, schema adapters for migrations and ORM models (Prisma, Django, Eloquent), `if/elseif` and router-based dispatch, cross-file handler resolution, better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.3.

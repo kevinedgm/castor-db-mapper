@@ -1,4 +1,4 @@
-# Castor DB Mapper architecture (0.2.0)
+# Castor DB Mapper architecture (0.3.0)
 
 ## Aim
 
@@ -14,6 +14,7 @@ No dependency on a running application, external service, Graphify, database cre
 
 - **Query adapters** (`QueryAdapter` in `adapters/base.py`): know where SQL lives in one file type. Shipped: `php` (string literals), `sql` (statements).
 - **Entry adapter** (`adapters/entries.py`): records raw references to endpoint files from JS/TS/Vue/HTML/PHP. The core resolves them against scanned files: root-relative, then caller-relative (includes try caller-relative first), then a unique path suffix (strips deployment prefixes such as `/app/`). Unresolved references become warnings, never edges.
+- **Dispatch** (`adapters/dispatch.py`, used by the PHP adapter's optional `structure()`): masks strings/comments, finds function spans by brace matching, and treats a `switch` on an action-like parameter (`action`, `accion`, `op`, ...) or any top-level `switch` as dispatch. Each `case 'x'` becomes an action whose reach is its case body plus same-file functions it calls, transitively. The front-end action sent with a call is read from the call line, the following lines, or the payload built in the preceding lines (stopping at another endpoint reference or a function boundary).
 - Planned: schema adapters (migrations, ORM models) and query adapters for other languages.
 
 Per-file records carry an `analyzer` version; when it changes, cached records are rebuilt.
@@ -24,6 +25,7 @@ Per-file records carry an `analyzer` version; when it changes, cached records ar
 - `query`: observed SQL statement with source path/line, operation and sanitized excerpt.
 - `table`: static table name found in SQL.
 - `column`: column declared in DDL or observed in qualified join predicates.
+- `action`: one dispatched operation inside an endpoint file.
 
 ## Edges
 
@@ -33,6 +35,9 @@ Per-file records carry an `analyzer` version; when it changes, cached records ar
 - `RELATES_TO`: column → column, with `DECLARED` when found in `CREATE TABLE FOREIGN KEY`, or `CODE_OBSERVED` when an equality predicate connects two qualified table aliases.
 - `CALLS_ENDPOINT`: file → server file referenced by a URL literal (meta: `via`, `resolution`, `raw`).
 - `INCLUDES`: server file → file it includes/requires.
+- `HAS_ACTION`: file → `action:<file>#<name>`.
+- `RUNS_QUERY`: action → query reachable from it.
+- `CALLS_ACTION`: caller file → action, when the call's action name exists in the target (or is resolved later through includes by `endpoints`).
 - `POSSIBLE_RELATION`: low-confidence inferred naming similarity, never equivalent to a physical constraint.
 
 Each edge has a deterministic ID, evidence and source line when available. Declarations and code observations can coexist. `DECLARED` means **found in source DDL**, not **verified in live production schema**.

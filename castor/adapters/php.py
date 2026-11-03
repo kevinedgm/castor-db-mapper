@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .base import SQL_START, Statement
+from .dispatch import structure as dispatch_structure
 
 
 def scan_php_literals(source: str) -> list[tuple[str, int, bool]]:
@@ -69,3 +70,6 @@ class PhpAdapter:
 
     def statements(self, path: str, source: str) -> list[Statement]:
         return [Statement(s, ln, dyn) for s, ln, dyn in scan_php_literals(source) if SQL_START.search(s)]
+
+    def structure(self, path: str, source: str) -> dict:
+        return dispatch_structure(source)

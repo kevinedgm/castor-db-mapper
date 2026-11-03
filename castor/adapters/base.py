@@ -23,3 +23,6 @@ class QueryAdapter(Protocol):
     extensions: set[str]
 
     def statements(self, path: str, source: str) -> list[Statement]: ...
+
+    # Optional: `structure(path, source) -> {"functions": {...}, "actions": {...}}`
+    # (see adapters/dispatch.py) to split one endpoint file into actions.
