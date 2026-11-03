@@ -15,6 +15,7 @@ No dependency on a running application, external service, Graphify, database cre
 - **Query adapters** (`QueryAdapter` in `adapters/base.py`): know where SQL lives in one file type. Shipped: `php` (string literals), `sql` (statements).
 - **Entry adapter** (`adapters/entries.py`): records raw references to endpoint files from JS/TS/Vue/HTML/PHP. The core resolves them against scanned files: root-relative, then caller-relative (includes try caller-relative first), then a unique path suffix (strips deployment prefixes such as `/app/`). Unresolved references become warnings, never edges.
 - **Dispatch** (`adapters/dispatch.py`, used by the PHP adapter's optional `structure()`): masks strings/comments, finds function spans by brace matching, and treats a `switch` on an action-like parameter (`action`, `accion`, `op`, ...) or any top-level `switch` as dispatch. Each `case 'x'` becomes an action whose reach is its case body plus same-file functions it calls, transitively. The front-end action sent with a call is read from the call line, the following lines, or the payload built in the preceding lines (stopping at another endpoint reference or a function boundary).
+- `match ($action) { 'a', 'b' => … }` (PHP 8) is treated like a switch. Dispatch into class methods in other files is not followed, so such actions list no tables yet.
 - Planned: schema adapters (migrations, ORM models) and query adapters for other languages.
 
 Per-file records carry an `analyzer` version; when it changes, cached records are rebuilt.

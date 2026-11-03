@@ -28,7 +28,7 @@ Open `/path/to/other-project/.castor/graph.html` in a browser. It is an offline 
 python install.py /path/to/other-project
 ```
 
-This copies **two agents** and **five skills** under the target `.claude/` directory. Existing files are never overwritten unless `--force` is explicitly supplied. You can also copy them to your global Claude Code configuration as appropriate. For projects without Castor source installed, call the scanner from the Castor checkout (`cd /path/to/castor-db-mapper` and run `python -m castor scan /your/project`).
+This copies **two agents** and **six skills** under the target `.claude/` directory. Existing files are never overwritten unless `--force` is explicitly supplied. You can also copy them to your global Claude Code configuration as appropriate. For projects without Castor source installed, call the scanner from the Castor checkout (`cd /path/to/castor-db-mapper` and run `python -m castor scan /your/project`).
 
 Example in Claude Code:
 
@@ -51,6 +51,10 @@ Example in Claude Code:
 ## Table relationship map
 
 `python -m castor --output PROJECT/.castor map` writes `relations.html`, an offline interactive map with one line per pair of tables that the code compares column to column, even when no foreign key exists. Line color tells the evidence (observed in code, declared FK, inferred by name), thickness tells how many queries use it. Selecting a table lists every related table, the exact column pairs and sample `file:line` evidence (live files first, backups last). Schema-qualified names (`db.table`) are merged. Filters hide relation kinds or weak links (minimum number of queries).
+
+## Building a module
+
+The `castor-module-build` skill turns the evidence into a backend module: it locates the domain with `endpoints`/`query`, reads the project's own architecture rules, designs a contract, implements it in layers (api → service → repository), tests it (unit, disposable-DB integration, HTTP with the real guard) and writes the contract and an improvements report separating facts from proposals. First run: `nn-usuarios` in NisaNabani.
 
 ## Adding a language
 

@@ -25,6 +25,9 @@ ACTION_PARAMS = {"action", "accion", "acción", "op", "opcion", "operacion", "fu
 _FUNC = re.compile(r"\bfunction\s+&?\s*([A-Za-z_]\w*)\s*\(")
 _SWITCH = re.compile(r"\bswitch\s*\(")
 _CASE = re.compile(r"\b(case)\s+|\b(default)\s*:")
+_MATCH = re.compile(r"\bmatch\s*\(")
+# one arm label list: 'a' =>   or   'a', "b" =>   (masked source keeps the quotes)
+_ARM = re.compile(r"""(?:["'][^"'\n]*["']\s*,\s*)*["'][^"'\n]*["']\s*=>""")
 _CALL = re.compile(r"(?<![\w$>:])([A-Za-z_]\w*)\s*\(")
 
 
@@ -80,7 +83,7 @@ def _paren(masked: str, open_at: int) -> int:
 
 
 def structure(source: str) -> dict:
-    if "switch" not in source:  # no dispatch possible: skip the expensive part
+    if "switch" not in source and "match" not in source:  # no dispatch possible: skip the expensive part
         return {"functions": {}, "actions": {}}
     masked = mask(source)
     pairs = _brace_pairs(masked)
@@ -140,6 +143,25 @@ def structure(source: str) -> dict:
                 last -= 1
             act["spans"].append([line_at[m.start()], line_at[last]])
             act["calls"] = sorted(set(act["calls"]) | set(calls))
+
+    # PHP 8 `match ($action) { 'a' => f(), 'b', 'c' => g(), default => ... }`
+    for m in _MATCH.finditer(masked):
+        close = _paren(masked, m.end() - 1)
+        words = {w.lower() for w in re.findall(r"\w+", source[m.end():close])}
+        blk = _block(masked, close + 1, pairs)
+        if not blk or not words & ACTION_PARAMS:
+            continue
+        a, b = blk
+        arms = list(_ARM.finditer(masked, a + 1, b))
+        for k, arm in enumerate(arms):
+            end = arms[k + 1].start() if k + 1 < len(arms) else b
+            names = re.findall(r"""["']([^"'$\n]+)["']""", source[arm.start():arm.end()])
+            body = masked[arm.end():end]
+            calls = sorted({c for c in _CALL.findall(body) if c in functions})
+            for name in names:
+                act = actions.setdefault(name.strip(), {"line": line_at[arm.start()], "spans": [], "calls": []})
+                act["spans"].append([line_at[arm.start()], line_at[max(arm.start(), end - 1)]])
+                act["calls"] = sorted(set(act["calls"]) | set(calls))
 
     # reachable functions (same file, transitive)
     calls_of = {f: sorted({c for c in _CALL.findall(masked[s:e]) if c in functions and c != f}) for f, (s, e) in functions.items()}

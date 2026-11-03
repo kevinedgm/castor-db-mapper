@@ -122,6 +122,18 @@ function unrelated() { switch ($tipo) { case 'x': $u = "DELETE FROM logs"; break
             self.assertEqual([c["line"] for c in acts["lista"]["callers"]], [2])
             self.assertEqual([c["line"] for c in acts["guarda"]["callers"]], [5])
 
+    def test_php8_match_dispatch(self):
+        from castor.adapters.dispatch import structure
+        src = """<?php
+$r = match ($_GET['action'] ?? '') { 'a', 'b' => uno(), 'c' => dos(), default => null };
+$t = match ($tipo) { 'x' => uno() };
+function uno() { $q = "SELECT * FROM t"; }
+function dos() {}
+"""
+        acts = structure(src)["actions"]
+        self.assertEqual(sorted(acts), ["a", "b", "c"])  # match on $tipo is not dispatch
+        self.assertEqual(acts["a"]["reach"], ["uno"])
+
 
 
 class RelationsMapTests(unittest.TestCase):
