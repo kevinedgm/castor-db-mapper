@@ -1,7 +1,10 @@
-"""Conservative, deterministic PHP/SQL evidence scanner. No project code execution."""
+"""Conservative, deterministic code-to-database evidence scanner. No project code execution.
+
+Language-specific extraction lives in castor/adapters; this module is language-agnostic."""
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import html
 import json
 import re
@@ -12,10 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import EXTENSIONS, adapters_for
+from .adapters import entries as entry_adapter
 from .adapters.php import scan_php_literals  # noqa: F401  (re-export)
 from .adapters.sqlfile import sql_statements  # noqa: F401  (re-export)
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+ANALYZER = 2  # bump when per-file analysis changes so cached records are rebuilt
 IGNORED = {".git", ".castor", "node_modules", "vendor", "bower_components", ".venv", "venv", "__pycache__", "dist", "build"}
 IDENT = re.compile(r"^[A-Za-z_][\w$]*$")
 STOP = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "USING", "SET", "VALUES", "RETURNING", "FOR"}
@@ -211,7 +216,10 @@ def scan_sql(sql: str, path: str, line: int, dynamic: bool = False) -> dict:
 
 
 def analyze(path: str, source: str) -> dict:
-    n = {"sha256": digest(source), "nodes": [node("file", path)], "edges": [], "warnings": [], "queries": 0}
+    refs = [r._asdict() for r in entry_adapter.references(path, source)] if entry_adapter.applies(path) else []
+    has_queries = bool(adapters_for(path))
+    n = {"sha256": digest(source), "analyzer": ANALYZER, "nodes": [node("file", path)] if (has_queries or refs) else [],
+         "edges": [], "warnings": [], "queries": 0, "refs": refs}
     for adapter in adapters_for(path):
         for st in adapter.statements(path, source):
             result = scan_sql(st.sql, path, st.line, st.dynamic)
@@ -260,13 +268,59 @@ def build_graph(records: dict) -> dict:
         warnings.extend(record["warnings"])
     for e in infer_relationships(list(nodes.values()), list(edges.values())):
         edges[e["id"]] = e
+    for e, warning in resolve_references(records):
+        if e:
+            edges[e["id"]] = e
+        if warning:
+            warnings.append(warning)
     return {"version": 1, "nodes": sorted(nodes.values(), key=lambda x: x["id"]), "edges": sorted(edges.values(), key=lambda x: x["id"]), "warnings": warnings}
+
+
+def resolve_references(records: dict):
+    """Link raw endpoint references to scanned files: root-relative, then caller-relative, then unique suffix."""
+    known = set(records)
+    by_name: dict[str, list[str]] = {}
+    for k in known:
+        by_name.setdefault(k.rsplit("/", 1)[-1], []).append(k)
+    for caller, record in records.items():
+        base = caller.rsplit("/", 1)[0] if "/" in caller else ""
+        for ref in record.get("refs", []):
+            raw = ref["target"]
+            root_rel = ("root", posixpath.normpath(raw.lstrip("/")))
+            if ref["kind"] == "include":  # `__DIR__ . '/db.php'` or 'db.php': caller directory first
+                candidates = [("relative", posixpath.normpath(posixpath.join(base, raw.lstrip("/")))), root_rel]
+            else:  # front-end URLs in this kind of app are usually relative to the web root
+                candidates = [root_rel, ("relative", posixpath.normpath(posixpath.join(base, raw)))]
+            target, how = None, None
+            for how_, cand in candidates:
+                if cand in known:
+                    target, how = cand, how_
+                    break
+            if not target:
+                # Deployment prefixes (`/app/mod/x.php`, `${origin}/app/x.php`): drop leading
+                # segments until exactly one scanned file ends with the remaining path.
+                parts = [p for p in posixpath.normpath(raw.split("}")[-1]).split("/") if p not in ("", ".", "..")]
+                for i in range(len(parts)):
+                    tail = "/".join(parts[i:])
+                    matches = [k for k in by_name.get(parts[-1], []) if k == tail or k.endswith("/" + tail)]
+                    if len(matches) == 1:
+                        target, how = matches[0], "suffix"
+                        break
+                    if matches:  # ambiguous: a shorter tail would only be more ambiguous
+                        break
+            ev = {"file": caller, "line": ref["line"], "kind": "CODE_OBSERVED"}
+            if not target or target == caller:
+                if not target:
+                    yield None, {"path": caller, "line": ref["line"], "reason": f"Endpoint reference not resolved: {raw}"}
+                continue
+            kind = "INCLUDES" if ref["kind"] == "include" else "CALLS_ENDPOINT"
+            yield edge(f"file:{caller}", f"file:{target}", kind, ev, via=ref["via"], resolution=how, raw=raw), None
 
 
 def files_to_scan(root: Path) -> list[Path]:
     paths = []
     for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in EXTENSIONS or any(piece in IGNORED for piece in p.relative_to(root).parts):
+        if not p.is_file() or p.suffix.lower() not in EXTENSIONS | entry_adapter.ENTRY_EXTENSIONS or any(piece in IGNORED for piece in p.relative_to(root).parts):
             continue
         paths.append(p)
     return sorted(paths)
@@ -290,7 +344,7 @@ def scan(root: Path, output: Path | None = None, full: bool = False) -> dict:
         except OSError:
             continue
         sha = digest(source)
-        if rel in old and old[rel].get("sha256") == sha:
+        if rel in old and old[rel].get("sha256") == sha and old[rel].get("analyzer") == ANALYZER:
             records[rel] = old[rel]
             reused += 1
         else:
@@ -350,6 +404,51 @@ def subgraph(output: Path, term: str, depth: int = 2, limit: int = 120) -> dict:
                 d["meta"] = json.loads(d["meta"])
                 nodes.append(d)
         return {"term": term, "seeds": seeds, "nodes": nodes, "edges": list(edges.values())}
+
+
+def endpoints(output: Path, term: str = "", include_depth: int = 3) -> dict:
+    """Endpoint map: server file -> who calls it -> tables it reads/writes (following includes)."""
+    g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    out_edges: dict[str, list[dict]] = {}
+    for e in g["edges"]:
+        out_edges.setdefault(e["source"], []).append(e)
+    callers: dict[str, list[dict]] = {}
+    for e in g["edges"]:
+        if e["type"] == "CALLS_ENDPOINT":
+            callers.setdefault(e["target"], []).append({"file": e["evidence"]["file"], "line": e["evidence"]["line"], "via": e["meta"].get("via")})
+
+    def tables(fid: str) -> tuple[dict, list[str]]:
+        found: dict[str, dict] = {}
+        seen, frontier, via = {fid}, [fid], []
+        for depth in range(include_depth + 1):
+            nxt = []
+            for f in frontier:
+                for e in out_edges.get(f, []):
+                    if e["type"] == "CONTAINS_QUERY":
+                        for q in out_edges.get(e["target"], []):
+                            if q["type"] in {"READ", "WRITE"}:
+                                slot = found.setdefault(q["target"].split(":", 1)[1], {"ops": set(), "from": set()})
+                                slot["ops"].add(q["type"])
+                                slot["from"].add(f.split(":", 1)[1])
+                    elif e["type"] == "INCLUDES" and e["target"] not in seen and depth < include_depth:
+                        seen.add(e["target"])
+                        nxt.append(e["target"])
+                        via.append(e["target"].split(":", 1)[1])
+            frontier = nxt
+        return {t: {"ops": sorted(m["ops"]), "from": sorted(m["from"])} for t, m in sorted(found.items())}, via
+
+    result = []
+    for fid, calls in callers.items():
+        tbl, inc = tables(fid)
+        path = fid.split(":", 1)[1]
+        if term and term.lower() not in path.lower() and not any(term.lower() in t for t in tbl):
+            continue
+        result.append({"endpoint": path, "callers": sorted(calls, key=lambda c: (c["file"], c["line"])),
+                       "tables": tbl, "via_includes": inc})
+    result.sort(key=lambda r: (-len(r["callers"]), r["endpoint"]))
+    return {"term": term, "count": len(result), "endpoints": result,
+            "limits": ["Endpoint granularity is the file; in-file dispatch (?accion=...) is not split",
+                       "URLs built at runtime are not resolved", "Tables come only from statically resolved SQL"]}
 
 
 def report(output: Path) -> dict:

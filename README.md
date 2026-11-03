@@ -1,8 +1,10 @@
 # Castor DB Mapper
 
-**Portable backend/database knowledge graph for Claude Code.** Analyze PHP/MySQL repositories, keep a local searchable evidence index, identify implicit table relationships, and plan endpoints based on existing code.
+**Portable backend/database knowledge graph for Claude Code.** Analyze repositories that talk to SQL databases, keep a local searchable evidence index, identify implicit table relationships, map which front-end code calls which endpoint and which tables each endpoint touches, and plan endpoints based on existing code.
 
-> **Status: v0.1 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
+The core is language-agnostic; language support lives in small adapters (`castor/adapters/`). v0.2 ships adapters for PHP, `.sql` files and endpoint references from JS/TS/Vue/HTML/PHP.
+
+> **Status: v0.2 experimental.** The initial functional scanner is deliberately narrow. It does not run PHP, connect to databases or claim that code-observed relationships are physical `FOREIGN KEY` constraints.
 
 ## Quick start
 
@@ -14,6 +16,7 @@ python -m castor scan /path/to/other-project
 python -m castor --output /path/to/other-project/.castor report
 python -m castor --output /path/to/other-project/.castor query "muestras" --depth 2
 python -m castor --output /path/to/other-project/.castor visualize --term "muestras"
+python -m castor --output /path/to/other-project/.castor endpoints "muestras"
 ```
 
 Open `/path/to/other-project/.castor/graph.html` in a browser. It is an offline HTML graph of the relevant subgraph with node filtering and evidence details. Scan again after code changes; unchanged files are reused by SHA-256.
@@ -41,6 +44,11 @@ Example in Claude Code:
 - Recognized `CREATE TABLE ... FOREIGN KEY ... REFERENCES ...` as **DECLARED** evidence from the source file.
 - Optional **INFERRED** low-confidence table associations from `_id` / `id_` naming.
 - Unresolved statements, source hashes, bounded graph queries and HTML export.
+- **Endpoint map** (`endpoints`): string literals naming a server file (`axios.get('mod/api.php')`, `fetch(...)`, `href`, `include/require`) become `CALLS_ENDPOINT` / `INCLUDES` edges, resolved only against files that exist in the repo. For each endpoint you get its callers (`file:line`, mechanism) and the tables it reads/writes, following includes, with the file each table comes from.
+
+## Adding a language
+
+Write a class with `name`, `extensions` and `statements(path, source) -> list[Statement]` in `castor/adapters/`, and append it to `QUERY_ADAPTERS` in `castor/adapters/__init__.py`. The SQL analysis, graph, index and endpoint map are reused unchanged. Endpoint file types are listed in `ENDPOINT_SUFFIXES` (`castor/adapters/entries.py`).
 
 **Important:** `DECLARED` indicates an FK found in the SQL source, **not** proof that the live database has the constraint. All graphs describe what the scanner observed, not necessarily every behavior of the running system. See [architecture and limits](docs/ARCHITECTURE.md).
 
@@ -67,4 +75,4 @@ Tests exercise missing-FK joins, explicit FK declarations, read/write operations
 
 ## Roadmap
 
-Better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.1.
+Query adapters for Python/JS/Java/Go string SQL, schema adapters for migrations and ORM models (Prisma, Django, Eloquent), per-action endpoint dispatch (`?accion=`), better PHP AST/SQL grammar adapters, more SQL dialects, live schema *metadata-only* adapters, confirmed Graphify ingestion format, route/permission traces, and stronger business entity modeling. These are **not** present in v0.2.
