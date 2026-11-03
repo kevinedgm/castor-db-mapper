@@ -15,3 +15,6 @@ castor = "castor.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["castor*"]
+
+[tool.setuptools.package-data]
+castor = ["templates/*.html"]

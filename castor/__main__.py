@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from .core import endpoints, export_html, report, scan, subgraph
+from .core import endpoints, export_html, export_relations_html, report, scan, subgraph
 
 
 def main(argv=None):
@@ -20,6 +20,7 @@ def main(argv=None):
     q.add_argument("--limit", type=int, default=120)
     ep = cmds.add_parser("endpoints", help="Endpoint map: callers -> server file -> tables")
     ep.add_argument("term", nargs="?", default="")
+    cmds.add_parser("map", help="Export relations.html: interactive table relationship map")
     r = cmds.add_parser("report", help="Coverage and unresolved work")
     v = cmds.add_parser("visualize", help="Export standalone interactive graph.html")
     v.add_argument("--term", default="")
@@ -36,6 +37,8 @@ def main(argv=None):
             result = subgraph(output, args.term, args.depth, args.limit)
         elif args.command == "endpoints":
             result = endpoints(output, args.term)
+        elif args.command == "map":
+            result = {"html": str(export_relations_html(output))}
         elif args.command == "report":
             result = report(output)
         else:

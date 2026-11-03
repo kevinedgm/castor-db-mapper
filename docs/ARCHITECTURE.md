@@ -46,6 +46,10 @@ Each edge has a deterministic ID, evidence and source line when available. Decla
 
 `python -m castor scan PROJECT` performs a full first pass and later skips unchanged files. `python -m castor --output PROJECT/.castor query TERM --depth 2` retrieves a bounded subgraph. `visualize` emits a self-contained HTML with filtering and link evidence. Agent text instructions reside under `.claude/` and can be installed in other repositories via `install.py`.
 
+## Table map
+
+`relations_map()` aggregates `RELATES_TO` and `POSSIBLE_RELATION` edges into one link per unordered table pair (strongest evidence kind wins: DECLARED > CODE_OBSERVED > INFERRED), with column pairs, query and file counts, and up to 8 evidence locations. `export_relations_html()` injects it into `castor/templates/relations.html` (self-contained; seeded force layout, no external JS).
+
 ## Boundaries and roadmap
 
 - Initial tokenizer is conservative, not a PHP AST or a full SQL grammar; SQL split across PHP concatenations, heredoc, runtime query builders, complex CTEs, triggers and stored procedures can be incomplete. Results remain `CODE_OBSERVED` or unresolved, never invented.

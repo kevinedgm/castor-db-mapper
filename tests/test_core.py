@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from castor.core import analyze, endpoints, scan, subgraph, sql_tokens, export_html
+from castor.core import analyze, endpoints, export_relations_html, relations_map, scan, subgraph, sql_tokens, export_html
 from castor.adapters import adapters_for
 from castor.adapters.entries import references
 
@@ -121,6 +121,27 @@ function unrelated() { switch ($tipo) { case 'x': $u = "DELETE FROM logs"; break
             self.assertEqual(acts["guarda"]["tables"], {"pagos": {"ops": ["WRITE"], "from": ["api.php:6"]}})
             self.assertEqual([c["line"] for c in acts["lista"]["callers"]], [2])
             self.assertEqual([c["line"] for c in acts["guarda"]["callers"]], [5])
+
+
+
+class RelationsMapTests(unittest.TestCase):
+    def test_table_pairs_aggregate_columns_and_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.php").write_text('<?php $q = "SELECT * FROM muestras m JOIN clientes c ON m.cliente_id = c.id"; ?>')
+            (root / "b.php").write_text('<?php $q = "SELECT * FROM db.clientes c JOIN muestras m ON c.id = m.cliente_id"; ?>')
+            (root / "s.sql").write_text("CREATE TABLE muestras (id INT, cliente_id INT, FOREIGN KEY (cliente_id) REFERENCES clientes(id));")
+            scan(root)
+            data = relations_map(root / ".castor")
+            self.assertEqual(len(data["links"]), 1)  # db.clientes merged into clientes, both directions merged
+            link = data["links"][0]
+            self.assertEqual((link["a"], link["b"], link["kind"]), ("clientes", "muestras", "DECLARED"))
+            self.assertEqual(link["n"], 3)
+            self.assertEqual(link["files"], 3)
+            self.assertEqual([(p["a"], p["b"]) for p in link["pairs"]], [("id", "cliente_id")])
+            page = export_relations_html(root / ".castor").read_text()
+            self.assertTrue(page.startswith("<!doctype html>"))
+            self.assertNotIn("__CASTOR_DATA__", page)
 
 
 if __name__ == "__main__":

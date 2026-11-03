@@ -17,6 +17,7 @@ python -m castor --output /path/to/other-project/.castor report
 python -m castor --output /path/to/other-project/.castor query "muestras" --depth 2
 python -m castor --output /path/to/other-project/.castor visualize --term "muestras"
 python -m castor --output /path/to/other-project/.castor endpoints "muestras"
+python -m castor --output /path/to/other-project/.castor map   # -> .castor/relations.html
 ```
 
 Open `/path/to/other-project/.castor/graph.html` in a browser. It is an offline HTML graph of the relevant subgraph with node filtering and evidence details. Scan again after code changes; unchanged files are reused by SHA-256.
@@ -46,6 +47,10 @@ Example in Claude Code:
 - Unresolved statements, source hashes, bounded graph queries and HTML export.
 - **Endpoint map** (`endpoints`): string literals naming a server file (`axios.get('mod/api.php')`, `fetch(...)`, `href`, `include/require`) become `CALLS_ENDPOINT` / `INCLUDES` edges, resolved only against files that exist in the repo. For each endpoint you get its callers (`file:line`, mechanism) and the tables it reads/writes, following includes, with the file each table comes from.
 - **Actions inside an endpoint**: files that dispatch with `switch ($_POST['action']) { case 'x': ... }` are split into actions. Each action lists the front-end calls that send it (`action: 'x'`, `?action=x`, payload built just before the call) and the tables reached from its `case` body and the same-file functions it calls. `unmatched_actions` lists actions the front end sends but the server does not dispatch statically: dead calls, removed handlers or `if/elseif` dispatch worth checking.
+
+## Table relationship map
+
+`python -m castor --output PROJECT/.castor map` writes `relations.html`, an offline interactive map with one line per pair of tables that the code compares column to column, even when no foreign key exists. Line color tells the evidence (observed in code, declared FK, inferred by name), thickness tells how many queries use it. Selecting a table lists every related table, the exact column pairs and sample `file:line` evidence (live files first, backups last). Schema-qualified names (`db.table`) are merged. Filters hide relation kinds or weak links (minimum number of queries).
 
 ## Adding a language
 

@@ -510,6 +510,85 @@ def report(output: Path) -> dict:
     return m
 
 
+def relations_map(output: Path) -> dict:
+    """Table-level relationship map: one link per table pair, with column pairs and evidence.
+
+    Schema-qualified names (`db.table`) are merged into `table` for the map.
+    """
+    g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    bare = lambda t: t.split(".")[-1]  # noqa: E731
+    query_file = {e["target"]: e["source"].split(":", 1)[1] for e in g["edges"] if e["type"] == "CONTAINS_QUERY"}
+    tables: dict[str, dict] = {}
+
+    def table(name: str) -> dict:
+        return tables.setdefault(bare(name), {"name": bare(name), "reads": 0, "writes": 0, "files": set(), "cols": set()})
+
+    for n in g["nodes"]:
+        if n["type"] == "table":
+            table(n["label"])
+        elif n["type"] == "column":
+            t, c = n["label"].rsplit(".", 1)
+            table(t)["cols"].add(c)
+    for e in g["edges"]:
+        if e["type"] in {"READ", "WRITE"}:
+            t = table(e["target"].split(":", 1)[1])
+            t["reads" if e["type"] == "READ" else "writes"] += 1
+            if e["source"] in query_file:
+                t["files"].add(query_file[e["source"]])
+    rank = {"DECLARED": 3, "CODE_OBSERVED": 2, "INFERRED": 1}
+    links: dict[tuple, dict] = {}
+    for e in g["edges"]:
+        if e["type"] not in {"RELATES_TO", "POSSIBLE_RELATION"}:
+            continue
+        kind = e["evidence"].get("kind", "INFERRED")
+        src = e["source"].split(":", 1)[1]
+        dst = e["target"].split(":", 1)[1]
+        ta, ca = src.rsplit(".", 1)
+        if e["target"].startswith("table:"):
+            tb, cb = dst, "?"
+        else:
+            tb, cb = dst.rsplit(".", 1)
+        ta, tb = bare(ta), bare(tb)
+        if ta == tb:
+            continue
+        if (ta, ca) > (tb, cb):
+            ta, ca, tb, cb = tb, cb, ta, ca
+        link = links.setdefault((ta, tb), {"a": ta, "b": tb, "kind": kind, "n": 0, "files": set(), "pairs": {}, "ev": []})
+        if rank[kind] > rank[link["kind"]]:
+            link["kind"] = kind
+        pair = link["pairs"].setdefault((ca, cb), {"a": ca, "b": cb, "kinds": set(), "n": 0})
+        pair["kinds"].add(kind)
+        if kind != "INFERRED":
+            pair["n"] += 1
+            link["n"] += 1
+            link["files"].add(e["evidence"]["file"])
+            if len(link["ev"]) < 60:
+                link["ev"].append({"file": e["evidence"]["file"], "line": e["evidence"].get("line"), "kind": kind,
+                                   "pair": f"{ta}.{ca} = {tb}.{cb}"})
+    # Show evidence from live-looking files first (backups and dated copies last).
+    stale = re.compile(r"(old|olds|respaldo|backup|copia|_v\d|\d{6}|_viejo|_demo|[-_]x\.|_\.php)", re.I)
+    for lk in links.values():
+        lk["ev"] = sorted(lk["ev"], key=lambda e: (bool(stale.search(e["file"])), e["file"].count("/"), e["file"]))[:8]
+    table_list = [{**t, "files": len(t["files"]), "cols": sorted(t["cols"])} for t in sorted(tables.values(), key=lambda t: t["name"])]
+    link_list = []
+    for lk in sorted(links.values(), key=lambda x: (-x["n"], x["a"], x["b"])):
+        pairs = sorted(({**p, "kinds": sorted(p["kinds"], key=lambda k: -rank[k])} for p in lk["pairs"].values()), key=lambda p: -p["n"])
+        link_list.append({**lk, "files": len(lk["files"]), "pairs": pairs})
+    m = json.loads((output / "manifest.json").read_text(encoding="utf-8")) if (output / "manifest.json").exists() else {}
+    return {"generated_at": m.get("generated_at"), "root": Path(m.get("root", "")).name, "tables": table_list, "links": link_list}
+
+
+def export_relations_html(output: Path) -> Path:
+    data = relations_map(output)
+    template = (Path(__file__).parent / "templates" / "relations.html").read_text(encoding="utf-8")
+    payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+    dest = output / "relations.html"
+    page = template.replace("__CASTOR_DATA__", payload)
+    head = '<!doctype html>\n<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+    dest.write_text(head + page.replace("<header>", "</head><body><header>", 1) + "</body></html>\n", encoding="utf-8")
+    return dest
+
+
 def export_html(output: Path, term: str = "", limit: int = 150) -> Path:
     """Dependency-free interactive SVG graph; label click reveals evidence."""
     g = json.loads((output / "graph.json").read_text(encoding="utf-8"))
